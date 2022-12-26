@@ -13,6 +13,7 @@ PREMAC="de:ad:be:ef"
 NET=u
 DAEMONIZE="&"
 
+VM=$(realpath "$0")
 
 help() {
    echo "Escribir la ayuda..."
@@ -256,7 +257,7 @@ $2"
                fisica|macvtap)
                   [ -z "$tipo" ] && error 0 "El huésped no podrá conectar con el anfitrión, porque la interfaz física es la configurada."
                   ifname=$(interfaz_libre macvtap)
-                  mac="$(sudo `which vm` -up "$VERBOSE" "$SIMULATE" macvtap "$ifname@$iface")"
+                  mac="$(sudo "$VM" -up "$VERBOSE" "$SIMULATE" macvtap "$ifname@$iface")"
                   tap=${mac#* }
                   mac=${mac% *}
                   set -- "$@" -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num,fd=$fd"
@@ -276,7 +277,7 @@ $2"
                   -netdev "socket,id=nic$num,mcast=230.0.0.$((tipo+1)):$MCASTPORT"
             else
                bridge=vmnet$tipo
-               [ -d "/sys/class/net/$bridge" ] || sudo `which vm` -up "$VERBOSE" "$SIMULATE" bridge "$bridge"
+               [ -d "/sys/class/net/$bridge" ] || sudo "$VM" -up "$VERBOSE" "$SIMULATE" bridge "$bridge"
                set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$bridge"
                ifaces="${ifaces:+$ifaces }$bridge"
             fi
@@ -374,5 +375,5 @@ unset IFS
 printf "${INFO:+$INFO\n}"
 eval '{
    REDIRECT="$redirect" execute $QEMU "$@"
-   sudo "$(which vm)" -down "$VERBOSE" "$SIMULATE" $ifaces
+   sudo "$VM" -down "$VERBOSE" "$SIMULATE" $ifaces
 }' $DAEMONIZE

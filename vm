@@ -1,0 +1,378 @@
+#!/bin/sh
+
+QEMU="qemu-system-x86_64"
+EFIFIRM="/usr/share/ovmf/OVMF.fd"
+VIDEO=vga
+RAM=512
+VNCPORT=5900
+TELNETPORT=10000
+SSHPORT=10022
+MONITORPORT=2345
+MCASTPORT=12345
+PREMAC="de:ad:be:ef"
+NET=u
+DAEMONIZE="&"
+
+
+help() {
+   echo "Escribir la ayuda..."
+}
+
+
+#
+## Ejecuta o imprime una orden.
+#
+execute() {
+   [ -n "$VERBOSE" ] && echo "$@" "$REDIRECT" > /dev/tty
+   [ -z "$SIMULATE" ] && eval '"$@"' $REDIRECT
+}
+
+
+#
+## Obtiene el primer puerto libre a partir del proporcionado
+#
+puerto_libre() {
+   local ini="$1" candidato
+
+   ss -H4ltn | awk -F":| +" -v "INI=$ini" '$5 >= INI {print $5}' | sort -n | {
+      while read -r candidato; do
+         [ $candidato -gt $ini ] && break
+         ini=$((ini+1))
+      done
+      echo $ini
+   }
+}
+
+#
+## Provoca un error (con código $1) escribiendo un mensaje de salida ($2)
+#
+error() {
+   local ERROR=$1
+   shift
+
+   echo "$*" >&2
+   [ $ERROR -gt 0 ] && exit $ERROR
+}
+
+{ ## Análisis de argumentos
+   #
+   ## Determina si el primer argumento está incluido en el segundo
+   #
+   in_str() {
+      expr "$2" : '.*\<'"$1"'\>' > /dev/null
+   }
+
+
+   case "$1" in
+      -up|-down)
+         NET="$1"
+         VERBOSE="$2"
+         SIMULATE="$3"
+         shift 3
+         ;;
+      *)
+         # Opciones con argumento
+         REQ_ARG="disk net display usb dir"
+         NUMARGS=$#
+
+         while [ $NUMARGS -gt 0 ]; do
+            case "$1" in
+               -d)
+                  DEBUG=1
+                  ;;
+               -dir)
+                  error 5 "'$1': opción aún no soportada"
+                  SHARE="$2"
+                  ;;
+               -disk)
+                  DISCOS="${DISCOS}
+$2"
+                  ;;
+               -display)
+                  VIDEO="$2"
+                  ;;
+               -f)
+                  DAEMONIZE=
+                  ;;
+               -h|-help)
+                  help
+                  exit 0
+                  ;;
+               -net)
+                  NET="$2"
+                  ;;
+               -s)
+                  SIMULATE=1
+                  VERBOSE=1
+                  DAEMONIZE=
+                  ;;
+               -U)
+                  EFI=1
+                  ;;
+               -usb)
+                  USB="$USB $2"
+                  ;;
+               -v)
+                  VERBOSE=1
+                  ;;
+               --) # Se acabaron los argumentos propios
+                  shift
+                  break
+                  ;;
+               *) # Lo que no sabemos qué es, se supondrá un parámetro de qemu-system
+                  set -- "$@" "$1"
+                  ;;
+            esac
+            DELARGS=1
+            in_str "${1#-}" "$REQ_ARG" && DELARGS=2
+            shift $DELARGS
+            NUMARGS=$((NUMARGS-DELARGS))
+         done
+
+         # Opciones predeterminadas + incluidas expresamente en la orden
+         set -- -nodefaults -m "$RAM" -machine accel=kvm "$@"
+         [ -n "$EFI" ] && set -- "$@" -bios "$EFIFIRM"
+         ;;
+   esac
+}
+
+{ ### Configuración de la red
+   #
+   ## Calcula una dirección MAC aleatoria
+   #
+   macaddress() {
+      local bytes
+
+      bytes=$(echo "$PREMAC" | wc -c)
+      bytes=$((6-bytes/3))
+
+      printf "%s" "$PREMAC"
+      od -v -An -tx1 -N$bytes /dev/urandom | tr ' ' ':'
+      echo
+   }
+
+   #
+   ## Detecta cuál es la interfaz del anfitrión que conecta con el exterior
+   #
+   detecta_interfaz() {
+      local riface iface="$(ip route show | awk '/^default via/  {print $NF}')"
+
+      [ -n "$iface" ] || error 1 "Adaptador imposible: el anfitrión parece no conectar con el exterior."
+
+      if [ -d "/sys/class/net/$iface/bridge" ];  then
+         echo "$iface" bridge
+      elif [ -d "/sys/class/net/$iface/macvtap"  ]; then
+         # En realidad queremos la interfaz física
+         iface="$(awk -F= '/^INTERFACE/ {print $2}' /sys/class/net/$iface/uevent)"
+         echo "$iface" macvtap
+      elif realpath "/sys/class/net/$iface" | grep -q "^/sys/devices/virtual"; then
+         echo "$iface" "desconocida"
+      else
+         echo "$iface" "fisica"
+      fi
+   }
+
+   #
+   ## Busca una interfaz libre usando como nombre la plantilla proporcionada por $1
+   #
+   interfaz_libre() {
+      local DIRCLASS="/sys/class/net/" num=0
+
+      while true; do
+         [ -d "$DIRCLASS$1$num" ] || break
+         num=$((num+1))
+      done
+
+      echo "$1$num" 
+   }
+
+   ## El script se ejecutó con sudo para crear o destruir interfaces de  red
+   case "$NET" in
+      -up)
+         case "$1" in
+            bridge)
+               execute ip link add name "$2" type bridge
+               execute ip link set "$2" up
+               exit $?
+               ;;
+            macvtap)
+               mac=$(macaddress)
+               echo "$2" | {
+                  IFS="@" read -r ifname iface
+                  execute ip link add link "$iface" name "$ifname" address "$mac" type macvtap mode bridge
+                  execute ip link set "$ifname" up
+                  if [ -n "$SIMULATE" ]; then
+                     tap=/dev/tap$((0x$(openssl rand -hex 1)))
+                  else
+                     tap=/dev/tap$(cat "/sys/class/net/$ifname/ifindex")
+                  fi
+                  execute chown "$(logname)" "$tap"
+                  echo "$mac $tap"
+               }
+               exit $?
+               ;;
+            *)
+               error 1 "'$1': Tipo de interfaz no soportado"
+               ;;
+         esac
+         ;;
+      -down)  # Deben borrarse todas las interfaces.
+         while [ $# -gt 0 ]; do
+            execute ip link del "$1"
+            shift
+         done
+         exit $?
+         ;;
+   esac
+
+   USUARIO=
+   num=0
+   fd=3
+   # "-net 0123,tap" provoca que las redes internas se hagan con interfaces bridge no con socket.
+   if expr "$NET" : ".*," > /dev/null; then
+      TAP=${NET#*,}
+      NET=${NET%,*}
+      [ "$TAP" = "tap" ] || TAP=
+   fi
+   [ "$NET" = "none" ] && NET=
+   for tipo in $(echo "$NET" |  grep -o '.'); do
+      case "$tipo" in
+         u)  # Red de usuario
+            [ -n "$USUARIO" ] && error 0 "Se elimina una red de usuario duplicada"
+            ssh_port=$(puerto_libre "$SSHPORT")
+            set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
+               -netdev "user,id=nic$num,hostfwd=tcp:127.0.0.1:$ssh_port-:22"
+            INFO="${INFO:+$INFO\n}Puerto SSH disponible en localhost:$ssh_port."
+            USUARIO=1
+            ;;
+         p)  # Interfaz puente
+            iface="$(detecta_interfaz)"
+            tipo="${iface#* }"
+            iface="${iface% *}"
+            case "$tipo" in
+               bridge)
+                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$iface"
+                  ;;
+               fisica|macvtap)
+                  [ -z "$tipo" ] && error 0 "El huésped no podrá conectar con el anfitrión, porque la interfaz física es la configurada."
+                  ifname=$(interfaz_libre macvtap)
+                  mac="$(sudo `which vm` -up "$VERBOSE" "$SIMULATE" macvtap "$ifname@$iface")"
+                  tap=${mac#* }
+                  mac=${mac% *}
+                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num,fd=$fd"
+                  redirect="${redirect:+$redirect }$fd<>$tap"
+                  ifaces="${ifaces:+$ifaces }$ifname"
+                  fd=$((fd+1))
+                  ;;
+               *)
+                  error 1 "Adaptador puente imposible: La interfaz virtual '$iface' no está soportada."
+                  ;;
+            esac
+            ;;
+         [0-9a-f])  # Redes internas
+            tipo=$((0x$tipo))
+            if [ -z "$TAP" ]; then # Con socket.
+               set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
+                  -netdev "socket,id=nic$num,mcast=230.0.0.$((tipo+1)):$MCASTPORT"
+            else
+               bridge=vmnet$tipo
+               [ -d "/sys/class/net/$bridge" ] || sudo `which vm` -up "$VERBOSE" "$SIMULATE" bridge "$bridge"
+               set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$bridge"
+               ifaces="${ifaces:+$ifaces }$bridge"
+            fi
+            ;;
+         *)
+            error 3 "'$tipo': Tipo de red desconocida"
+            ;;
+      esac
+      num=$((num+1))
+   done
+}
+
+{ ## Genera los discos
+   IFS='
+'
+bootindex=0
+for d in $DISCOS; do
+   if [ -f "$d" ]; then  # Archivo regular.
+      case "$(file -b --mime-type "$d")" in
+         application/x-iso9660-image)
+            device="virtio-blk,drive=cdrom$bootindex"
+            [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
+            blockdev="driver=file,node-name=cdrom$bootindex,filename=$d" 
+            set -- "$@" -blockdev "$blockdev" -device "$device"
+            ;;
+         *) # Suponemos que será un QCOW2
+            file -b "$d" | grep -q '\<QCOW2\>' || error 4 "'$d': Formato de disco desconocido"
+            device="virtio-blk,drive=hdd$bootindex"
+            [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
+            blockdev="driver=file,node-name=qcw$bootindex,filename=$d" 
+            blockdevqcw="driver=qcow2,node-name=hdd$bootindex,file=qcw$bootindex"
+            set -- "$@" -blockdev "$blockdev" -blockdev "$blockdevqcw" -device "$device"
+            ;;
+      esac
+   elif [ -b "$d" ]; then # Directamente un dispositivo (p.e. /dev/sr0)
+      device="virtio-blk,drive=dev$bootindex"
+      [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
+      blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
+      set -- "$@" -blockdev "$blockdev" -device "$device"
+   else
+      error 3 "'$d': Disco inexistente"
+   fi
+   bootindex=$((bootindex+1))
+done
+unset IFS
+}
+
+{ ## Salida de vídeo
+   case "$VIDEO" in
+      stdio)
+         set -- "$@" -serial mon:stdio -display none
+         INFO="Tenga paciencia. No habrá salida hasta que el núcleo no empiece a recibir mensajes."
+         DAEMONIZE=
+         ;;
+      telnet*)
+         telnet_port=${VIDEO#telnet}
+         telnet="localhost${telnet_port:-:$(puerto_libre "$TELNETPORT")}"
+         set -- "$@" -serial mon:telnet:$telnet,server=on,wait=off -display none
+         INFO="Servidor telnet escuchando en $telnet.\nTenga paciencia. No habrá salida hasta que el núcleo no empiece a recibir mensajes."
+         ;;
+      vga)
+         set -- "$@" -device virtio-vga -display gtk,window-close=off -monitor vc
+         ;;
+      vnc)
+         vnc_port=$(($(puerto_libre "$VNCPORT")-VNCPORT))
+         set -- "$@" -device virtio-vga -display vnc=localhost:$vnc_port
+         INFO="Servidor VNC escuchando en localhost:$vnc_port."
+         ;;
+      spice)
+         socket=$(mktemp -up /var/run --suffix=.socket)
+         monitorport=$(puerto_libre "$MONITORPORT")
+         set -- "$@" -device qxl-vga -spice "unix=on,addr=/tmp/${socket},disable-ticketing=on" -display spice-app \
+            -device virtio-serial -device "virtserialport,chardev=spicechannel0,name=com.redhat.spice.0" \
+            -chardev "spicevmc,id=spicechannel0,name=vdagent" -monitor "telnet:localhost:$monitorport,server=on,wait=off"
+         INFO="Servidor telnet para acceso al monitor escuchando en localhost:$monitorport"
+         ;;
+      none)
+         set -- "$@" -display none
+         ;;
+      *)
+         error 3 "'$VIDEO': Salida de vídeo no disponible"
+   esac
+}
+
+{ ### Dispositivos USB
+   for usb in $USB; do
+      if lsusb | awk '{print $6}' | grep -q '^'"$usb"'$'; then
+         set  -- "$@" -device "usb-host,vendorid=0x${usb%:*},productid=0x${usb#*:}"
+      else
+         error 3 "'$usb': Dispositivo USB inexistente"
+      fi
+   done
+}
+
+printf "${INFO:+$INFO\n}"
+eval '{
+   REDIRECT="$redirect" execute $QEMU "$@"
+   sudo "$(which vm)" -down "$VERBOSE" "$SIMULATE" $ifaces
+}' $DAEMONIZE

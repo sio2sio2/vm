@@ -2,6 +2,8 @@
 
 QEMU="qemu-system-x86_64"
 EFIFIRM="/usr/share/ovmf/OVMF.fd"
+HELPER="/usr/lib/qemu/qemu-bridge-helper"
+VHOSTNET="/dev/vhost-net"
 VIDEO=vga
 RAM=512
 VNCPORT=5900
@@ -16,7 +18,49 @@ DAEMONIZE="&"
 VM=$(realpath "$0")
 
 help() {
-   echo "Escribir la ayuda..."
+   echo "$(basename "$0") [opciones|opciones_de_qemu] [--] [opciones_de_qemu]
+  Script para arrancar máquina virtuales con QEmu.
+
+Facilita el lanzamiento de qemu-system-x86_64 con la inclusión de algunas
+opciones propias que simplifican las propias de QEmu. De menor a mayor
+precedencia hay cuatro tipos de opciones:
+
++ Las prefijadas que añaden aceleración por hardware y 512MiB de RAM.
++ Las incluidas tras --, que serán pasadas sin modificación a
+  qemu-system-x86_64.
++ Las opciones no definidas como propias, que se considerarán de QEmu  y
+  se pasarán sin modificación a qemu-system-x86_64.
++ Las opciones propias.
+
+Opciones propias:
+
+ -disk disco      Define como almacenamiento un archivo QCOW2, ISO o un
+                  dispositivo de bloques. La opción puede repetirse y en un
+                  arranque BIOS la prioridad vendrá dada por el orden  en que
+                  se escriben.
+ -display DISP    Salida para el anfitrión. Puede ser stdio (E/S estándar),
+                  telnet[:puerto], vga (ventana gráfica), vnc, spice o none.
+ -f               Mantiene la orden en primer plano para todas las salidas. Por
+                  defecto sólo stdio lo hace.
+ -h|-help         Muestra esta ayuda.
+ -net RED         Define cómo se conectan las interfaces de red del anfitrión.
+                  El argumento es 'none' (sin red) o una combinación de 'u'
+                  (red de usuario), p (adaptador puente) y dígitos hexadecimales
+                  (red interna). Por ejemplo, 'u05' define tres interfaces de
+                  red, una en la red de usuario, otra en la red interna '0' y
+                  una última en la red interna '5'. Si se añade 'tap' tras coma
+                  ('u05,tap'), las redes internas se construirán con un puente
+                  en vez de con un socket.
+ -s               Simula la ejecución del script y muestra cuáles son las
+                  órdenes necesarias para lanzar la máquina.
+ -U               Establece firmware UEFI, en vez de BIOS.
+ -usb V:P         Pasa al huésped el dispositivo USB de vendedor 'V' y producto
+                  'P'.
+ -v               Muestra las ordenes que se ejecutan.
+
+Información adicional: 
+  https://sio2sio2.github.io/doc-linux/98.apendice/05.virtual/02.kvm/01.qemu/06.script.html
+"
 }
 
 
@@ -78,9 +122,6 @@ error() {
 
          while [ $NUMARGS -gt 0 ]; do
             case "$1" in
-               -d)
-                  DEBUG=1
-                  ;;
                -dir)
                   error 5 "'$1': opción aún no soportada"
                   SHARE="$2"
@@ -132,7 +173,10 @@ $2"
 
          # Opciones predeterminadas + incluidas expresamente en la orden
          set -- -nodefaults -m "$RAM" -machine accel=kvm "$@"
-         [ -n "$EFI" ] && set -- "$@" -bios "$EFIFIRM"
+         if [ -n "$EFI" ]; then
+            [ -r "$EFIFIRM" ] || error 4 "No se encuentra '$EFIFIRM'."
+            set -- "$@" -bios "$EFIFIRM"
+         fi
          ;;
    esac
 }
@@ -236,6 +280,17 @@ $2"
       [ "$TAP" = "tap" ] || TAP=
    fi
    [ "$NET" = "none" ] && NET=
+
+   if [ -n "$TAP" ] || expr "$NET" : ".*p" > /dev/null; then  # Usamos tap o macvtap
+      if ! grep -q 'vhost_net' /proc/modules; then
+         error 0 "Módulo vhost_net no disponible. Se deshabilita el soporte para vhost-net."
+      elif [ -w "$VHOSTNET" ]; then
+         VHOSTNET_SUPPORT=1
+      else
+         error 0 "Sin permiso de escritura sobre $VHOSTNET. Se deshabilita el soporte para vhost-net."
+      fi
+   fi
+
    for tipo in $(echo "$NET" |  grep -o '.'); do
       case "$tipo" in
          u)  # Red de usuario
@@ -252,7 +307,21 @@ $2"
             iface="${iface% *}"
             case "$tipo" in
                bridge)
-                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$iface"
+                  extra=
+                  if [ -n "$VHOSTNET_SUPPORT" ]; then
+                     if [ -x "$HELPER" ]; then
+                        extra=",vhost=on,vhostfd=$fd,helper=$HELPER"
+                     else
+                        error 0 "'$HELPER' no existe. Se deshabilita el soporte para vhost-net."
+                     fi
+                  fi
+                  if [ -n "$extra" ]; then
+                     set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "tap,id=nic$num,br=$iface$extra"
+                     redirect="${redirect:+$redirect }$fd<>$VHOSTNET"
+                     fd=$((fd+1))
+                  else
+                     set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$iface"
+                  fi
                   ;;
                fisica|macvtap)
                   [ -z "$tipo" ] && error 0 "El huésped no podrá conectar con el anfitrión, porque la interfaz física es la configurada."
@@ -262,8 +331,15 @@ $2"
                   #mac=$(cat "/sys/class/net/$ifname/address")
                   tap=${mac#* }
                   mac=${mac% *}
-                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num,fd=$fd"
                   redirect="${redirect:+$redirect }$fd<>$tap"
+                  if [ -n "$VHOSTNET_SUPPORT" ]; then
+                     extra=",fd=$fd,vhost=on,vhostfd=$((fd+1))"
+                     redirect="${redirect:+$redirect }$((fd+1))<>$VHOSTNET"
+                     fd=$((fd+1))
+                  else
+                     extra=",fd=$fd"
+                  fi
+                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num$extra"
                   ifaces="${ifaces:+$ifaces }$ifname"
                   fd=$((fd+1))
                   ;;
@@ -278,10 +354,26 @@ $2"
                set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
                   -netdev "socket,id=nic$num,mcast=230.0.0.$((tipo+1)):$MCASTPORT"
             else
+               extra=
+               if [ -n "$VHOSTNET_SUPPORT" ]; then
+                  if [ -x "$HELPER" ]; then
+                     extra=",vhost=on,vhostfd=$fd,helper=$HELPER"
+                  else
+                     error 0 "'$HELPER' no existe. Se deshabilita el soporte para vhost-net."
+                  fi
+               fi
                bridge=vmnet$tipo
-               [ -d "/sys/class/net/$bridge" ] || sudo "$VM" -up "$VERBOSE" "$SIMULATE" bridge "$bridge"
-               set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$bridge"
-               ifaces="${ifaces:+$ifaces }$bridge"
+               if [ ! -d "/sys/class/net/$bridge" ]; then
+                  sudo "$VM" -up "$VERBOSE" "$SIMULATE" bridge "$bridge"
+                  ifaces="${ifaces:+$ifaces }$bridge"
+               fi
+               if [ -n "$extra" ]; then
+                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "tap,id=nic$num,br=$bridge$extra"
+                  redirect="${redirect:+$redirect }$fd<>$VHOSTNET"
+                  fd=$((fd+1))
+               else
+                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$bridge"
+               fi
             fi
             ;;
          *)
@@ -331,14 +423,14 @@ unset IFS
    case "$VIDEO" in
       stdio)
          set -- "$@" -serial mon:stdio -display none
-         INFO="Tenga paciencia. No habrá salida hasta que el núcleo no empiece a recibir mensajes."
+         INFO="Redirigido el puerto serie a la E/S estándar."
          DAEMONIZE=
          ;;
       telnet*)
          telnet_port=${VIDEO#telnet}
          telnet="localhost${telnet_port:-:$(puerto_libre "$TELNETPORT")}"
          set -- "$@" -serial mon:telnet:$telnet,server=on,wait=off -display none
-         INFO="Servidor telnet escuchando en $telnet.\nTenga paciencia. No habrá salida hasta que el núcleo no empiece a recibir mensajes."
+         INFO="Redirigido el puerto serie a un servidor telnet escuchando en $telnet."
          ;;
       vga)
          set -- "$@" -device virtio-vga -display gtk,window-close=off -monitor vc
@@ -357,7 +449,7 @@ unset IFS
          INFO="Servidor telnet para acceso al monitor escuchando en localhost:$monitorport"
          ;;
       none)
-         set -- "$@" -display none
+         set -- -display none "$@"
          ;;
       *)
          error 3 "'$VIDEO': Salida de vídeo no disponible"

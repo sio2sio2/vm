@@ -208,6 +208,7 @@ $2"
                      tap=/dev/tap$(cat "/sys/class/net/$ifname/ifindex")
                   fi
                   execute chown "$(logname)" "$tap"
+                  echo "$mac" "$tap"  # Por si estamos simulando.
                }
                exit $?
                ;;
@@ -256,9 +257,11 @@ $2"
                fisica|macvtap)
                   [ -z "$tipo" ] && error 0 "El huésped no podrá conectar con el anfitrión, porque la interfaz física es la configurada."
                   ifname=$(interfaz_libre macvtap)
-                  sudo "$VM" -up "$VERBOSE" "$SIMULATE" macvtap "$ifname@$iface"
-                  tap="/dev/tap$(cat "/sys/class/net/$ifname/ifindex")"
-                  mac=$(cat "/sys/class/net/$ifname/address")
+                  mac=$(sudo "$VM" -up "$VERBOSE" "$SIMULATE" macvtap "$ifname@$iface")
+                  #tap="/dev/tap$(cat "/sys/class/net/$ifname/ifindex")"
+                  #mac=$(cat "/sys/class/net/$ifname/address")
+                  tap=${mac#* }
+                  mac=${mac% *}
                   set -- "$@" -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num,fd=$fd"
                   redirect="${redirect:+$redirect }$fd<>$tap"
                   ifaces="${ifaces:+$ifaces }$ifname"

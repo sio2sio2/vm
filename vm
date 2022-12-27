@@ -26,11 +26,11 @@ opciones propias que simplifican las propias de QEmu. De menor a mayor
 precedencia hay cuatro tipos de opciones:
 
 + Las prefijadas que añaden aceleración por hardware y 512MiB de RAM.
++ Las propias.
 + Las incluidas tras --, que serán pasadas sin modificación a
   qemu-system-x86_64.
-+ Las opciones no definidas como propias, que se considerarán de QEmu  y
-  se pasarán sin modificación a qemu-system-x86_64.
-+ Las opciones propias.
++ Las anteriores a -- que no son propias y se pasan sin modificación a
+  qemu-system-x86_64.
 
 Opciones propias:
 
@@ -127,8 +127,10 @@ error() {
                   SHARE="$2"
                   ;;
                -disk)
-                  DISCOS="${DISCOS}
-$2"
+                  # Se apuntan al revés para que al procesarse
+                  # acaben en el mismo orden en que se han escrito
+                  DISCOS="$2${DISCOS:+
+$DISCOS}"
                   ;;
                -display)
                   VIDEO="$2"
@@ -142,6 +144,14 @@ $2"
                   ;;
                -net)
                   NET="$2"
+                  if [ "$NET" = "none" ]; then
+                     NET=
+                  # "-net 0123,tap" provoca que las redes internas se hagan con interfaces bridge no con socket.
+                  elif expr "$NET" : ".*," > /dev/null; then
+                     TAP=${NET#*,}
+                     [ "$TAP" = "tap" ] || TAP=
+                     NET=$(echo "${NET%,*}" | rev)
+                  fi
                   ;;
                -s)
                   SIMULATE=1
@@ -171,11 +181,9 @@ $2"
             NUMARGS=$((NUMARGS-DELARGS))
          done
 
-         # Opciones predeterminadas + incluidas expresamente en la orden
-         set -- -nodefaults -m "$RAM" -machine accel=kvm "$@"
          if [ -n "$EFI" ]; then
             [ -r "$EFIFIRM" ] || error 4 "No se encuentra '$EFIFIRM'."
-            set -- "$@" -bios "$EFIFIRM"
+            set -- -bios "$EFIFIRM" "$@"
          fi
          ;;
    esac
@@ -273,14 +281,6 @@ $2"
    USUARIO=
    num=0
    fd=3
-   # "-net 0123,tap" provoca que las redes internas se hagan con interfaces bridge no con socket.
-   if expr "$NET" : ".*," > /dev/null; then
-      TAP=${NET#*,}
-      NET=${NET%,*}
-      [ "$TAP" = "tap" ] || TAP=
-   fi
-   [ "$NET" = "none" ] && NET=
-
    if [ -n "$TAP" ] || expr "$NET" : ".*p" > /dev/null; then  # Usamos tap o macvtap
       if ! grep -q 'vhost_net' /proc/modules; then
          error 0 "Módulo vhost_net no disponible. Se deshabilita el soporte para vhost-net."
@@ -291,13 +291,13 @@ $2"
       fi
    fi
 
-   for tipo in $(echo "$NET" |  grep -o '.'); do
+   for tipo in $(echo "$NET" | grep -o '.'); do
       case "$tipo" in
          u)  # Red de usuario
             [ -n "$USUARIO" ] && error 0 "Se elimina una red de usuario duplicada"
             ssh_port=$(puerto_libre "$SSHPORT")
-            set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
-               -netdev "user,id=nic$num,hostfwd=tcp:127.0.0.1:$ssh_port-:22"
+            set -- -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
+               -netdev "user,id=nic$num,hostfwd=tcp:127.0.0.1:$ssh_port-:22" "$@"
             INFO="${INFO:+$INFO\n}Puerto SSH disponible en localhost:$ssh_port."
             USUARIO=1
             ;;
@@ -316,11 +316,11 @@ $2"
                      fi
                   fi
                   if [ -n "$extra" ]; then
-                     set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "tap,id=nic$num,br=$iface$extra"
-                     redirect="${redirect:+$redirect }$fd<>$VHOSTNET"
+                     set -- -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "tap,id=nic$num,br=$iface$extra"
+                     redirect="${redirect:+$redirect }$fd<>$VHOSTNET" "$@"
                      fd=$((fd+1))
                   else
-                     set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$iface"
+                     set -- -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$iface" "$@"
                   fi
                   ;;
                fisica|macvtap)
@@ -339,7 +339,7 @@ $2"
                   else
                      extra=",fd=$fd"
                   fi
-                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num$extra"
+                  set -- -device "virtio-net,netdev=nic$num,mac=$mac" -netdev "tap,id=nic$num$extra" "$@"
                   ifaces="${ifaces:+$ifaces }$ifname"
                   fd=$((fd+1))
                   ;;
@@ -351,8 +351,8 @@ $2"
          [0-9a-f])  # Redes internas
             tipo=$((0x$tipo))
             if [ -z "$TAP" ]; then # Con socket.
-               set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
-                  -netdev "socket,id=nic$num,mcast=230.0.0.$((tipo+1)):$MCASTPORT"
+               set -- -device "virtio-net,netdev=nic$num,mac=$(macaddress)" \
+                  -netdev "socket,id=nic$num,mcast=230.0.0.$((tipo+1)):$MCASTPORT" "$@"
             else
                extra=
                if [ -n "$VHOSTNET_SUPPORT" ]; then
@@ -368,11 +368,11 @@ $2"
                   ifaces="${ifaces:+$ifaces }$bridge"
                fi
                if [ -n "$extra" ]; then
-                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "tap,id=nic$num,br=$bridge$extra"
+                  set -- -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "tap,id=nic$num,br=$bridge$extra" "$@"
                   redirect="${redirect:+$redirect }$fd<>$VHOSTNET"
                   fd=$((fd+1))
                else
-                  set -- "$@" -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$bridge"
+                  set -- -device "virtio-net,netdev=nic$num,mac=$(macaddress)" -netdev "bridge,id=nic$num,br=$bridge" "$@"
                fi
             fi
             ;;
@@ -387,15 +387,16 @@ $2"
 { ## Genera los discos
    IFS='
 '
-bootindex=0
+bootindex=$(echo "$DISCOS" | wc -l)
 for d in $DISCOS; do
+   bootindex=$((bootindex-1))
    if [ -f "$d" ]; then  # Archivo regular.
       case "$(file -b --mime-type "$d")" in
          application/x-iso9660-image)
             device="virtio-blk,drive=cdrom$bootindex"
             [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
             blockdev="driver=file,node-name=cdrom$bootindex,filename=$d" 
-            set -- "$@" -blockdev "$blockdev" -device "$device"
+            set -- -blockdev "$blockdev" -device "$device" "$@"
             ;;
          *) # Suponemos que será un QCOW2
             file -b "$d" | grep -q '\<QCOW2\>' || error 4 "'$d': Formato de disco desconocido"
@@ -403,18 +404,17 @@ for d in $DISCOS; do
             [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
             blockdev="driver=file,node-name=qcw$bootindex,filename=$d" 
             blockdevqcw="driver=qcow2,node-name=hdd$bootindex,file=qcw$bootindex"
-            set -- "$@" -blockdev "$blockdev" -blockdev "$blockdevqcw" -device "$device"
+            set -- -blockdev "$blockdev" -blockdev "$blockdevqcw" -device "$device" "$@"
             ;;
       esac
    elif [ -b "$d" ]; then # Directamente un dispositivo (p.e. /dev/sr0)
       device="virtio-blk,drive=dev$bootindex"
       [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
       blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
-      set -- "$@" -blockdev "$blockdev" -device "$device"
+      set -- -blockdev "$blockdev" -device "$device" "$@"
    else
       error 3 "'$d': Disco inexistente"
    fi
-   bootindex=$((bootindex+1))
 done
 unset IFS
 }
@@ -422,30 +422,30 @@ unset IFS
 { ## Salida de vídeo
    case "$VIDEO" in
       stdio)
-         set -- "$@" -serial mon:stdio -display none
+         set -- -serial mon:stdio -display none "$@"
          INFO="Redirigido el puerto serie a la E/S estándar."
          DAEMONIZE=
          ;;
       telnet*)
          telnet_port=${VIDEO#telnet}
          telnet="localhost${telnet_port:-:$(puerto_libre "$TELNETPORT")}"
-         set -- "$@" -serial mon:telnet:$telnet,server=on,wait=off -display none
+         set -- -serial mon:telnet:$telnet,server=on,wait=off -display none "$@"
          INFO="Redirigido el puerto serie a un servidor telnet escuchando en $telnet."
          ;;
       vga)
-         set -- "$@" -device virtio-vga -display gtk,window-close=off -monitor vc
+         set -- -device virtio-vga -display gtk,window-close=off -monitor vc "$@"
          ;;
       vnc)
          vnc_port=$(($(puerto_libre "$VNCPORT")-VNCPORT))
-         set -- "$@" -device virtio-vga -display vnc=localhost:$vnc_port
+         set -- -device virtio-vga -display vnc=localhost:$vnc_port "$@"
          INFO="Servidor VNC escuchando en localhost:$vnc_port."
          ;;
       spice)
          socket=$(mktemp -up /var/run --suffix=.socket)
          monitorport=$(puerto_libre "$MONITORPORT")
-         set -- "$@" -device qxl-vga -spice "unix=on,addr=/tmp/${socket},disable-ticketing=on" -display spice-app \
+         set -- -device qxl-vga -spice "unix=on,addr=/tmp/${socket},disable-ticketing=on" -display spice-app \
             -device virtio-serial -device "virtserialport,chardev=spicechannel0,name=com.redhat.spice.0" \
-            -chardev "spicevmc,id=spicechannel0,name=vdagent" -monitor "telnet:localhost:$monitorport,server=on,wait=off"
+            -chardev "spicevmc,id=spicechannel0,name=vdagent" -monitor "telnet:localhost:$monitorport,server=on,wait=off" "$@"
          INFO="Servidor telnet para acceso al monitor escuchando en localhost:$monitorport"
          ;;
       none)
@@ -459,7 +459,7 @@ unset IFS
 { ### Dispositivos USB
    for usb in $USB; do
       if lsusb | awk '{print $6}' | grep -q '^'"$usb"'$'; then
-         set  -- "$@" -device "usb-host,vendorid=0x${usb%:*},productid=0x${usb#*:}"
+         set  -- -device "usb-host,vendorid=0x${usb%:*},productid=0x${usb#*:}" "$@"
       else
          error 3 "'$usb': Dispositivo USB inexistente"
       fi
@@ -468,6 +468,6 @@ unset IFS
 
 printf "${INFO:+$INFO\n}"
 eval '{
-   REDIRECT="$redirect" execute "$QEMU" "$@"
+   REDIRECT="$redirect" execute "$QEMU" -nodefaults -machine accel=kvm -m "$RAM" "$@"
    sudo "$VM" -down "$VERBOSE" "$SIMULATE" $ifaces
 }' $DAEMONIZE

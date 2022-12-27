@@ -162,7 +162,7 @@ $DISCOS}"
                   EFI=1
                   ;;
                -usb)
-                  USB="$USB $2"
+                  USB="$2 $USB"
                   ;;
                -v)
                   VERBOSE=1
@@ -312,7 +312,7 @@ $DISCOS}"
                      if [ -x "$HELPER" ]; then
                         extra=",vhost=on,vhostfd=$fd,helper=$HELPER"
                      else
-                        error 0 "'$HELPER' no existe. Se deshabilita el soporte para vhost-net."
+                        error 0 "'$HELPER' no existe. Se deshabilita el soporte de vhost-net para la interfaz puente."
                      fi
                   fi
                   if [ -n "$extra" ]; then
@@ -359,7 +359,7 @@ $DISCOS}"
                   if [ -x "$HELPER" ]; then
                      extra=",vhost=on,vhostfd=$fd,helper=$HELPER"
                   else
-                     error 0 "'$HELPER' no existe. Se deshabilita el soporte para vhost-net."
+                     error 0 "'$HELPER' no existe. Se deshabilita el soporte de vhost-net para la red interna $tipo."
                   fi
                fi
                bridge=vmnet$tipo

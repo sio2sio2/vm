@@ -34,10 +34,13 @@ precedencia hay cuatro tipos de opciones:
 
 Opciones propias:
 
+ -cdrom disco     Define un almacenamiento óptico. Puede ser tanto un
+                  archivo ISO como un dispositivo de bloques. La opción
+                  puede repetirse y la prioridad en un arranque BIOS vendrá
+                  dada por el orden en que se escriban (incluyendo los discos
+                  incluidos con -disk).
  -disk disco      Define como almacenamiento un archivo QCOW2, ISO o un
-                  dispositivo de bloques. La opción puede repetirse y en un
-                  arranque BIOS la prioridad vendrá dada por el orden  en que
-                  se escriben.
+                  dispositivo de bloques. La opción puede repetirse.
  -display DISP    Salida para el anfitrión. Puede ser stdio (E/S estándar),
                   telnet[:puerto], vga (ventana gráfica), vnc, spice o none.
  -f               Mantiene la orden en primer plano para todas las salidas. Por
@@ -117,11 +120,17 @@ error() {
          ;;
       *)
          # Opciones con argumento
-         REQ_ARG="disk net display usb dir"
+         REQ_ARG="cdrom disk dir display net usb"
          NUMARGS=$#
 
          while [ $NUMARGS -gt 0 ]; do
             case "$1" in
+               -cdrom)
+                  DISCOS="$2${DISCOS:+
+DISCOS}"
+                  CDS="$2${CDS:+
+CDS}"
+                  ;;
                -dir)
                   error 5 "'$1': opción aún no soportada"
                   SHARE="$2"
@@ -393,7 +402,7 @@ for d in $DISCOS; do
    if [ -f "$d" ]; then  # Archivo regular.
       case "$(file -b --mime-type "$d")" in
          application/x-iso9660-image)
-            device="virtio-blk,drive=cdrom$bootindex"
+            device="ide-cd,drive=cdrom$bootindex"
             [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
             blockdev="driver=file,node-name=cdrom$bootindex,filename=$d" 
             set -- -blockdev "$blockdev" -device "$device" "$@"
@@ -409,6 +418,7 @@ for d in $DISCOS; do
       esac
    elif [ -b "$d" ]; then # Directamente un dispositivo (p.e. /dev/sr0)
       device="virtio-blk,drive=dev$bootindex"
+      echo "$CDS" | grep -q '^'"$d"'$' && device="ide-cd,drive=dev$bootindex"
       [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
       blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
       set -- -blockdev "$blockdev" -device "$device" "$@"

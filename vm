@@ -159,8 +159,9 @@ $DISCOS}"
                   elif expr "$NET" : ".*," > /dev/null; then
                      TAP=${NET#*,}
                      [ "$TAP" = "tap" ] || TAP=
-                     NET=$(echo "${NET%,*}" | rev)
+                     NET=${NET%,*}
                   fi
+                  NET=$(echo "$NET" | rev)
                   ;;
                -s)
                   SIMULATE=1

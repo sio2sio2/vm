@@ -434,14 +434,14 @@ unset IFS
    case "$VIDEO" in
       stdio)
          set -- -serial mon:stdio -display none "$@"
-         INFO="Redirigido el puerto serie a la E/S estándar."
+         INFO="${INFO:+$INFO\n}Redirigido el puerto serie a la E/S estándar."
          DAEMONIZE=
          ;;
       telnet*)
          telnet_port=${VIDEO#telnet}
          telnet="localhost${telnet_port:-:$(puerto_libre "$TELNETPORT")}"
          set -- -serial mon:telnet:$telnet,server=on,wait=off -display none "$@"
-         INFO="Redirigido el puerto serie a un servidor telnet escuchando en $telnet."
+         INFO="${INFO:+$INFO\n}Redirigido el puerto serie a un servidor telnet escuchando en $telnet."
          ;;
       vga)
          set -- -device virtio-vga -display gtk,window-close=off -monitor vc "$@"
@@ -449,7 +449,7 @@ unset IFS
       vnc)
          vnc_port=$(($(puerto_libre "$VNCPORT")-VNCPORT))
          set -- -device virtio-vga -display vnc=localhost:$vnc_port "$@"
-         INFO="Servidor VNC escuchando en localhost:$vnc_port."
+         INFO="${INFO:+$INFO\n}Servidor VNC escuchando en localhost:$vnc_port."
          ;;
       spice)
          socket=$(mktemp -up /var/run --suffix=.socket)
@@ -457,7 +457,7 @@ unset IFS
          set -- -device qxl-vga -spice "unix=on,addr=/tmp/${socket},disable-ticketing=on" -display spice-app \
             -device virtio-serial -device "virtserialport,chardev=spicechannel0,name=com.redhat.spice.0" \
             -chardev "spicevmc,id=spicechannel0,name=vdagent" -monitor "telnet:localhost:$monitorport,server=on,wait=off" "$@"
-         INFO="Servidor telnet para acceso al monitor escuchando en localhost:$monitorport"
+         INFO="${INFO:+$INFO\n}Servidor telnet para acceso al monitor escuchando en localhost:$monitorport"
          ;;
       none)
          set -- -display none "$@"

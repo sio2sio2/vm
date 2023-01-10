@@ -34,11 +34,11 @@ precedencia hay cuatro tipos de opciones:
 
 Opciones propias:
 
- -cdrom disco     Define un almacenamiento óptico. Puede ser tanto un
-                  archivo ISO como un dispositivo de bloques. La opción
-                  puede repetirse y la prioridad en un arranque BIOS vendrá
-                  dada por el orden en que se escriban (incluyendo los discos
-                  incluidos con -disk).
+ -cdrom disco     Fuerza a que el dispotivo se identifique como óptico.
+                  Puede ser un archivo ISO o un dispositivo de bloques. La
+                  opción puede repetirse y la prioridad en un arranque BIOS
+                  vendrá dada por el orden en que se escriban (incluyendo los
+                  discos incluidos con -disk).
  -disk disco      Define como almacenamiento un archivo QCOW2, ISO o un
                   dispositivo de bloques. La opción puede repetirse.
  -display DISP    Salida para el anfitrión. Puede ser stdio (E/S estándar),
@@ -419,7 +419,10 @@ for d in $DISCOS; do
       esac
    elif [ -b "$d" ]; then # Directamente un dispositivo (p.e. /dev/sr0)
       device="virtio-blk,drive=dev$bootindex"
-      echo "$CDS" | grep -q '^'"$d"'$' && device="ide-cd,drive=dev$bootindex"
+      if [ "$(blk "$d" -no TYPE 2>/dev/null)" = "rom" ] ||  # Se identifica como óptico.
+         echo "$CDS" | grep -q '^'"$d"'$'; then  # Se proporcionó con -cdrom
+            device="ide-cd,drive=dev$bootindex"
+      fi
       [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
       blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
       set -- -blockdev "$blockdev" -device "$device" "$@"

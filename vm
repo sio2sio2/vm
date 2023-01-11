@@ -34,13 +34,13 @@ precedencia hay cuatro tipos de opciones:
 
 Opciones propias:
 
- -cdrom disco     Fuerza a que el dispotivo se identifique como óptico.
-                  Puede ser un archivo ISO o un dispositivo de bloques. La
-                  opción puede repetirse y la prioridad en un arranque BIOS
-                  vendrá dada por el orden en que se escriban (incluyendo los
-                  discos incluidos con -disk).
- -disk disco      Define como almacenamiento un archivo QCOW2, ISO o un
-                  dispositivo de bloques. La opción puede repetirse.
+ -cdrom disco     Fuerza a que el argumento se identique como un dispositivo
+                  óptico. Puede ser un archivo o un dispositivo de bloques.
+                  Por lo demás, se trata como -disk.
+ -disk disco      Define como almacenamiento un archivo QCOW2, RAW, ISO o un
+                  dispositivo de bloques. La opción puede repetirse y la
+                  la prioridad en un arranque BIOS vendrá dada por el orden
+                  en que se escriban.
  -display DISP    Salida para el anfitrión. Puede ser stdio (E/S estándar),
                   telnet[:puerto], vga (ventana gráfica), vnc, spice o none.
  -f               Mantiene la orden en primer plano para todas las salidas. Por
@@ -398,37 +398,31 @@ $DISCOS}"
    IFS='
 '
 bootindex=$(echo "$DISCOS" | wc -l)
+set -- -object iothread,id=iothread0 "$@"
 for d in $DISCOS; do
    bootindex=$((bootindex-1))
    if [ -f "$d" ]; then  # Archivo regular.
-      case "$(file -b --mime-type "$d")" in
-         application/x-iso9660-image)
-            device="ide-cd,drive=cdrom$bootindex"
-            [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
-            blockdev="driver=file,node-name=cdrom$bootindex,filename=$d" 
-            set -- -blockdev "$blockdev" -device "$device" "$@"
-            ;;
-         *) # Suponemos que será un QCOW2
-            file -b "$d" | grep -q '\<QCOW2\>' || error 4 "'$d': Formato de disco desconocido"
-            device="virtio-blk,drive=hdd$bootindex"
-            [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
-            blockdev="driver=file,node-name=qcw$bootindex,filename=$d" 
-            blockdevqcw="driver=qcow2,node-name=hdd$bootindex,file=qcw$bootindex"
-            set -- -blockdev "$blockdev" -blockdev "$blockdevqcw" -device "$device" "$@"
-            ;;
+      device="virtio-blk,drive=dev$bootindex,iothread=iothread0"
+      blockdev="driver=file,node-name=dev$bootindex,filename=$d" 
+      case "$(file -L "$d" | grep -om1 '\<ISO 9660\>\| DOS/MBR\>\|QCOW2')" in
+         ISO\ 9660) device="ide-cd,drive=dev$bootindex" ;;
+         \ DOS/MBR) ;;  # RAW
+         QCOW2) blockdev="driver=qcow2,node-name=dev$bootindex,file.driver=file,file.filename=$d,cache-size=16777216" ;;
+         *) error 4 "'$d': Formato de disco desconocido:" ;;
       esac
    elif [ -b "$d" ]; then # Directamente un dispositivo (p.e. /dev/sr0)
-      device="virtio-blk,drive=dev$bootindex"
-      if [ "$(blk "$d" -no TYPE 2>/dev/null)" = "rom" ] ||  # Se identifica como óptico.
-         echo "$CDS" | grep -q '^'"$d"'$'; then  # Se proporcionó con -cdrom
+      device="virtio-blk,drive=dev$bootindex,iothread=iothread0"
+      blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
+      if echo "$CDS" | grep -q '^'"$d"'$'; then  # Se proporcionó con -cdrom
+         [ "$(lsblk "$d" -no TYPE 2>/dev/null)" = "rom" ] ||  # Se identifica como óptico.
+         [ "$(file -sbL --mime-type "$d")" = "application/x-iso9660-image" ] ||  # El sistema es ISO-9660
             device="ide-cd,drive=dev$bootindex"
       fi
-      [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
-      blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
-      set -- -blockdev "$blockdev" -device "$device" "$@"
    else
       error 3 "'$d': Disco inexistente"
    fi
+   [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
+   set -- -blockdev "$blockdev" -device "$device" "$@"
 done
 unset IFS
 }

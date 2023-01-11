@@ -4,7 +4,6 @@ QEMU="qemu-system-x86_64"
 EFIFIRM="/usr/share/ovmf/OVMF.fd"
 HELPER="/usr/lib/qemu/qemu-bridge-helper"
 VHOSTNET="/dev/vhost-net"
-VIDEO=vga
 RAM=512
 VNCPORT=5900
 TELNETPORT=10000
@@ -13,6 +12,7 @@ MONITORPORT=2345
 MCASTPORT=12345
 PREMAC="de:ad:be:ef"
 NET=u
+VIDEO=vga
 DAEMONIZE="&"
 
 VM=$(realpath "$0")
@@ -34,25 +34,24 @@ precedencia hay cuatro tipos de opciones:
 
 Opciones propias:
 
- -cdrom disco     Fuerza a que el argumento se identique como un dispositivo
-                  óptico. Puede ser un archivo o un dispositivo de bloques.
-                  Por lo demás, se trata como -disk.
  -disk disco      Define como almacenamiento un archivo QCOW2, RAW, ISO o un
                   dispositivo de bloques. La opción puede repetirse y la
                   la prioridad en un arranque BIOS vendrá dada por el orden
-                  en que se escriban.
+                  en que se escriban. Pueden utilizarse los prefijos 'usb:' y
+                  'cdrom:' para especificar la naturaleza del almacenamiento.
+                  'cdrom:' no debería ser necesario en la mayor parte de casos.
  -display DISP    Salida para el anfitrión. Puede ser stdio (E/S estándar),
                   telnet[:puerto], vga (ventana gráfica), vnc, spice o none.
  -f               Mantiene la orden en primer plano para todas las salidas. Por
                   defecto sólo stdio lo hace.
- -h|-help         Muestra esta ayuda.
+ -h,-help         Muestra esta ayuda.
  -net RED         Define cómo se conectan las interfaces de red del anfitrión.
                   El argumento es 'none' (sin red) o una combinación de 'u'
                   (red de usuario), p (adaptador puente) y dígitos hexadecimales
                   (red interna). Por ejemplo, 'u05' define tres interfaces de
                   red, una en la red de usuario, otra en la red interna '0' y
-                  una última en la red interna '5'. Si se añade 'tap' tras coma
-                  ('u05,tap'), las redes internas se construirán con un puente
+                  una última en la red interna '5'. Si se añade el prefijo 'tap:'
+                  ('tap:u05'), las redes internas se construirán con un puente
                   en vez de con un socket.
  -s               Simula la ejecución del script y muestra cuáles son las
                   órdenes necesarias para lanzar la máquina.
@@ -62,7 +61,7 @@ Opciones propias:
  -v               Muestra las ordenes que se ejecutan.
 
 Información adicional: 
-  https://sio2sio2.github.io/doc-linux/98.apendice/05.virtual/02.kvm/01.qemu/06.script.html
+  https://sio2sio2.github.io/doc-linux/98.apendice/05.virtual/02.software/01.completa/02.kvm/01.qemu/06.script.html
 "
 }
 
@@ -120,17 +119,11 @@ error() {
          ;;
       *)
          # Opciones con argumento
-         REQ_ARG="cdrom disk dir display net usb"
+         REQ_ARG="dir disk display net usb"
          NUMARGS=$#
 
          while [ $NUMARGS -gt 0 ]; do
             case "$1" in
-               -cdrom)
-                  DISCOS="$2${DISCOS:+
-DISCOS}"
-                  CDS="$2${CDS:+
-CDS}"
-                  ;;
                -dir)
                   error 5 "'$1': opción aún no soportada"
                   SHARE="$2"
@@ -155,11 +148,10 @@ $DISCOS}"
                   NET="$2"
                   if [ "$NET" = "none" ]; then
                      NET=
-                  # "-net 0123,tap" provoca que las redes internas se hagan con interfaces bridge no con socket.
-                  elif expr "$NET" : ".*," > /dev/null; then
-                     TAP=${NET#*,}
-                     [ "$TAP" = "tap" ] || TAP=
-                     NET=${NET%,*}
+                  # "-net tap:0123" provoca que las redes internas se hagan con tap, no con socket.
+                  elif expr "$NET" : "tap:" > /dev/null; then
+                     TAP=1
+                     NET=${NET#tap:}
                   fi
                   NET=$(echo "$NET" | rev)
                   ;;
@@ -401,29 +393,44 @@ bootindex=$(echo "$DISCOS" | wc -l)
 set -- -object iothread,id=iothread0 "$@"
 for d in $DISCOS; do
    bootindex=$((bootindex-1))
+   media="${d%%:*}"
+   d=${d#*:}
+   case "$media" in
+      $d) media=disk ;;  # No se añadió prefijo.
+      usb) usbbus=xhciS ;;  # Habrá que añadir el -device correspondiente.
+      cdrom|disk) ;;
+      *) error 4 "'$media': Tipo de dispositivo no soportado."
+   esac
    if [ -f "$d" ]; then  # Archivo regular.
-      device="virtio-blk,drive=dev$bootindex,iothread=iothread0"
       blockdev="driver=file,node-name=dev$bootindex,filename=$d" 
-      case "$(file -L "$d" | grep -om1 '\<ISO 9660\>\| DOS/MBR\>\|QCOW2')" in
-         ISO\ 9660) device="ide-cd,drive=dev$bootindex" ;;
-         \ DOS/MBR) ;;  # RAW
+      case "$(file -bL "$d" | grep -om1 '\<ISO 9660\>\|^DOS/MBR\>\|\<QCOW2\>')" in
+         ISO\ 9660) [ "$media" = "disk" ] && media=cdrom ;;
+         DOS/MBR) ;;  # RAW
          QCOW2) blockdev="driver=qcow2,node-name=dev$bootindex,file.driver=file,file.filename=$d,cache-size=16777216" ;;
-         *) error 4 "'$d': Formato de disco desconocido:" ;;
+         *) error 4 "'$d': Formato de disco desconocido." ;;
       esac
-   elif [ -b "$d" ]; then # Directamente un dispositivo (p.e. /dev/sr0)
-      device="virtio-blk,drive=dev$bootindex,iothread=iothread0"
+   elif [ -b "$d" ]; then  # Directamente un dispositivo (p.e. /dev/sr0)
       blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
-      if echo "$CDS" | grep -q '^'"$d"'$'; then  # Se proporcionó con -cdrom
-         [ "$(lsblk "$d" -no TYPE 2>/dev/null)" = "rom" ] ||  # Se identifica como óptico.
-         [ "$(file -sbL --mime-type "$d")" = "application/x-iso9660-image" ] ||  # El sistema es ISO-9660
-            device="ide-cd,drive=dev$bootindex"
+      if [ "$media" = "disk" ]; then
+         if [ "$(lsblk "$d" -no TYPE 2>/dev/null)" = "rom" ] ||  # Se identifica como óptico.
+            [ "$(file -sbL --mime-type "$d")" = "application/x-iso9660-image" ]; then  # El sistema es ISO-9660
+               media=cdrom
+         fi
       fi
+   elif [ "$media" = "usb" ] && expr "$d" : "^[0-9A-Fa-f]\+:[0-9A-Fa-F]\+$"; then
+      USB="${USB:+ $USB}$d"
    else
-      error 3 "'$d': Disco inexistente"
+      error 3 "'$d': Disco inexistente o no soportado"
    fi
+   case "$media" in
+      disk) device="virtio-blk,drive=dev$bootindex,iothread=iothread0" ;;
+      cdrom) device="ide-cd,drive=dev$bootindex" ;;
+      usb) device="usb-storage,bus=$usbbus.0,drive=dev$bootindex" ;;
+   esac
    [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
    set -- -blockdev "$blockdev" -device "$device" "$@"
 done
+[ -n "$usbbus" ] && set -- -device "qemu-xhci,id=$usbbus" "$@"
 unset IFS
 }
 
@@ -467,11 +474,12 @@ unset IFS
 { ### Dispositivos USB
    for usb in $USB; do
       if lsusb | awk '{print $6}' | grep -q '^'"$usb"'$'; then
-         set  -- -device "usb-host,vendorid=0x${usb%:*},productid=0x${usb#*:}" "$@"
+         set  -- -device "usb-host,usb=xhciH.0,vendorid=0x${usb%:*},productid=0x${usb#*:}" "$@"
       else
          error 3 "'$usb': Dispositivo USB inexistente"
       fi
    done
+   [ -n "$USB" ] && set -- -device qemu-xhci,id=xhciH "$@"
 }
 
 printf "${INFO:+$INFO\n}"

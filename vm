@@ -1,18 +1,19 @@
 #!/bin/sh
 
 QEMU="qemu-system-x86_64"
-EFIFIRM="/usr/share/ovmf/OVMF.fd"
-HELPER="/usr/lib/qemu/qemu-bridge-helper"
-VHOSTNET="/dev/vhost-net"
-RAM=512
+EFIFIRM=${VM_EFIFIRM:-"/usr/share/ovmf/OVMF.fd"}
+HELPER=${VM_HELPER:-"/usr/lib/qemu/qemu-bridge-helper"}
+VHOSTNET=${VM_VHOSNET:-"/dev/vhost-net"}
+RAM=${VM_RAM:-512}
 VNCPORT=5900
 TELNETPORT=10000
 SSHPORT=10022
 MONITORPORT=2345
 MCASTPORT=12345
-PREMAC="de:ad:be:ef"
-NET=u
-VIDEO=vga
+PREMAC=${VM_PREMAC:-"de:ad:be:ef"}
+NET=${VM_NET:-u}
+VIDEO=${VM_VIDEO:-vga}
+HDDRIVER=${VM_HDDRIVER:-virtio-scsi}
 DAEMONIZE="&"
 
 VM=$(realpath "$0")
@@ -164,7 +165,7 @@ $DISCOS}"
                   EFI=1
                   ;;
                -usb)
-                  USB="$2 $USB"
+                  USB="$2${USB:+ $USB}"
                   ;;
                -v)
                   VERBOSE=1
@@ -390,48 +391,58 @@ $DISCOS}"
    IFS='
 '
 bootindex=$(echo "$DISCOS" | wc -l)
-set -- -object iothread,id=iothread0 "$@"
+numd=0
 for d in $DISCOS; do
    bootindex=$((bootindex-1))
    media="${d%%:*}"
    d=${d#*:}
    case "$media" in
-      $d) media=disk ;;  # No se añadió prefijo.
-      usb) usbbus=xhciS ;;  # Habrá que añadir el -device correspondiente.
-      cdrom|disk) ;;
+      "$d"|disk) media=hd ;;
+      usb)     usbbus=xhciS ;;
+      cdrom)   media=cd ;;
       *) error 4 "'$media': Tipo de dispositivo no soportado."
    esac
    if [ -f "$d" ]; then  # Archivo regular.
       blockdev="driver=file,node-name=dev$bootindex,filename=$d" 
       case "$(file -bL "$d" | grep -om1 '\<ISO 9660\>\|^DOS/MBR\>\|\<QCOW2\>')" in
-         ISO\ 9660) [ "$media" = "disk" ] && media=cdrom ;;
+         ISO\ 9660) [ "$media" = "hd" ] && media=cd ;;
          DOS/MBR) ;;  # RAW
          QCOW2) blockdev="driver=qcow2,node-name=dev$bootindex,file.driver=file,file.filename=$d,cache-size=16777216" ;;
          *) error 4 "'$d': Formato de disco desconocido." ;;
       esac
    elif [ -b "$d" ]; then  # Directamente un dispositivo (p.e. /dev/sr0)
       blockdev="drive=host_device,node-name=dev$bootindex,filename=$d"
-      if [ "$media" = "disk" ]; then
+      if [ "$media" = "hd" ]; then
          if [ "$(lsblk "$d" -no TYPE 2>/dev/null)" = "rom" ] ||  # Se identifica como óptico.
             [ "$(file -sbL --mime-type "$d")" = "application/x-iso9660-image" ]; then  # El sistema es ISO-9660
                media=cdrom
          fi
       fi
    elif [ "$media" = "usb" ] && expr "$d" : "^[0-9A-Fa-f]\+:[0-9A-Fa-F]\+$"; then
-      USB="${USB:+ $USB}$d"
+      USB="$d${USB:+ $USB}"
    else
       error 3 "'$d': Disco inexistente o no soportado"
    fi
    case "$media" in
-      disk) device="virtio-blk,drive=dev$bootindex,iothread=iothread0" ;;
-      cdrom) device="ide-cd,drive=dev$bootindex" ;;
+      [hc]d) 
+         if [ "$HDDRIVER" = "virtio-blk" ]; then
+            case "$media" in
+               hd) device="virtio-blk,drive=dev$bootindex,iothread=iothread0" ;;
+               cd) device="ide-cd,drive=dev$bootindex" ;;
+            esac
+         else
+            device="scsi-$media,drive=dev$bootindex,bus=scsi0.0,channel=0,scsi-id=0,lun=$numd"
+            numd=$((numd+1))
+         fi ;;
       usb) device="usb-storage,bus=$usbbus.0,drive=dev$bootindex" ;;
    esac
    [ -z "$EFI" ] && device="$device,bootindex=$bootindex"
    set -- -blockdev "$blockdev" -device "$device" "$@"
 done
-[ -n "$usbbus" ] && set -- -device "qemu-xhci,id=$usbbus" "$@"
 unset IFS
+set -- -object iothread,id=iothread0 "$@"
+[ $numd -gt 0 ] && [ "$HDDRIVER" != "virtio-blk" ] && set -- -device "virtio-scsi,id=scsi0,num_queues=4,iothread=iothread0" "$@"
+[ -n "$usbbus" ] && set -- -device "qemu-xhci,id=$usbbus" "$@"
 }
 
 { ## Salida de vídeo

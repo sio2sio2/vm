@@ -396,18 +396,26 @@ for d in $DISCOS; do
    bootindex=$((bootindex-1))
    media="${d%%:*}"
    d=${d#*:}
+   HDDRIVER=${VM_HDDRIVER:-virtio-scsi}
    case "$media" in
       "$d"|disk) media=hd ;;
+      scsi) media=hd ; HDDRIVER=virtio-scsi ;;
       usb)     usbbus=xhciS ;;
       cdrom)   media=cd ;;
+      blk)     media=hd ; HDDRIVER=virtio-blk ;;
       *) error 4 "'$media': Tipo de dispositivo no soportado."
+   esac
+   case "${d%%:*}" in
+      "$d") ;;
+      blk) d=${d#*:} ; HDDRIVER=virtio-blk ;;
+      scsi) d=${d#*:} ;;
    esac
    if [ -f "$d" ]; then  # Archivo regular.
       blockdev="driver=file,node-name=dev$bootindex,filename=$d" 
-      case "$(file -bL "$d" | grep -om1 '\<ISO 9660\>\|^DOS/MBR\>\|\<QCOW2\>')" in
+      case "$(file -bL "$d" | grep -om1 '\<ISO 9660\>\|^DOS/MBR\>\|\<QCOW\>')" in
          ISO\ 9660) [ "$media" = "hd" ] && media=cd ;;
          DOS/MBR) ;;  # RAW
-         QCOW2) blockdev="driver=qcow2,node-name=dev$bootindex,file.driver=file,file.filename=$d,cache-size=16777216" ;;
+         QCOW) blockdev="driver=qcow2,node-name=dev$bootindex,file.driver=file,file.filename=$d,cache-size=16777216" ;;
          *) error 4 "'$d': Formato de disco desconocido." ;;
       esac
    elif [ -b "$d" ]; then  # Directamente un dispositivo (p.e. /dev/sr0)

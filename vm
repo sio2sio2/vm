@@ -217,7 +217,7 @@ $DISCOS}"
 
       if [ -d "/sys/class/net/$iface/bridge" ];  then
          echo "$iface" bridge
-      elif [ -d "/sys/class/net/$iface/macvtap"  ]; then
+      elif [ -L /sys/class/net/$iface/lower_*  ]; then
          # En realidad queremos la interfaz física
          iface="$(awk -F= '/^INTERFACE/ {print $2}' /sys/class/net/$iface/uevent)"
          echo "$iface" macvtap
@@ -327,7 +327,7 @@ $DISCOS}"
                   fi
                   ;;
                fisica|macvtap)
-                  [ -z "$tipo" ] && error 0 "El huésped no podrá conectar con el anfitrión, porque la interfaz física es la configurada."
+                  [ "$tipo" = "fisica" ] && error 0 "El huésped no podrá conectar con el anfitrión, porque la interfaz física es la configurada."
                   ifname=$(interfaz_libre macvtap)
                   mac=$(sudo "$VM" -up "$VERBOSE" "$SIMULATE" macvtap "$ifname@$iface")
                   #tap="/dev/tap$(cat "/sys/class/net/$ifname/ifindex")"
